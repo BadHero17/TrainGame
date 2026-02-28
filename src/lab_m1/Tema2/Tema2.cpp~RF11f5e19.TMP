@@ -1,0 +1,1050 @@
+#include "lab_m1/Tema2/Tema2.h"
+
+#include <vector>
+#include <iostream>
+
+#include "core/engine.h"
+#include "utils/gl_utils.h"
+#include "transform.h"
+#include <iomanip>
+
+// Map constants
+constexpr int MAP_SIZE = 101;
+constexpr int MAP_VECTOR_INTERVAL = 50;
+constexpr int MAP_CENTER = 50;
+
+// Indexing constants (used to reprezent what exactly is on the map at said position)
+constexpr int INDEX_TERRAIN = 1;
+constexpr int INDEX_RIVER = 2;
+constexpr int INDEX_MOUNTAIN = 4;
+constexpr int INDEX_STATION = 8;
+constexpr int INDEX_RAIL = 16;
+
+constexpr int RESOURCE_BRICK = 2;
+constexpr int RESOURCE_COAL = 1;
+constexpr int RESOURCE_WOOD = 0;
+
+using namespace std;
+using namespace m1;
+
+Tema2::Tema2() {
+}
+
+Tema2::~Tema2() {
+}
+
+void Tema2::Init() {
+    camera = new cameraSpace::Camera(glm::vec3(2.0f, 0, 0), glm::vec3(10, 0, 0), glm::vec3(0, 1, 0));
+
+    projectionMatrix = glm::perspective(RADIANS(75.0f), window->props.aspectRatio, 0.01f, 200.0f);
+
+    Shader* shader = new Shader("SimpleShader");
+    shader->AddShader(PATH_JOIN(window->props.selfDir, SOURCE_PATH::M1, "Tema2", "Shaders", "Simple_VS.glsl"), GL_VERTEX_SHADER);
+    shader->AddShader(PATH_JOIN(window->props.selfDir, SOURCE_PATH::M1, "Tema2", "Shaders", "Simple_FS.glsl"), GL_FRAGMENT_SHADER);
+    shader->CreateAndLink();
+    shaders[shader->GetName()] = shader;
+
+    Shader* shaderWater = new Shader("WaterShader");
+    shaderWater->AddShader(PATH_JOIN(window->props.selfDir, SOURCE_PATH::M1, "Tema2", "Shaders", "Water_VS.glsl"), GL_VERTEX_SHADER);
+    shaderWater->AddShader(PATH_JOIN(window->props.selfDir, SOURCE_PATH::M1, "Tema2", "Shaders", "Water_FS.glsl"), GL_FRAGMENT_SHADER);
+    shaderWater->CreateAndLink();
+    shaders[shaderWater->GetName()] = shaderWater;
+
+    MakeLocomotive();
+    MakeWagon();
+
+    heightMap = vector<vector<float>>(MAP_SIZE, vector<float>(MAP_SIZE, 0));
+    indexMap = vector<vector<unsigned int>>(MAP_SIZE, vector<unsigned int>(MAP_SIZE, INDEX_TERRAIN));
+    GeneratePerlin();
+    AddRiver();
+    MakeRails();
+    MakeStation();
+    AddStations();
+    AddRails();
+    MakeRailway();
+    MakeTerrain();
+    MakeWater();
+}
+
+void Tema2::FrameStart() {
+    // Clears the color buffer (using the previously set color) and depth buffer
+    glClearColor(0.278f, 0.82f, 0.91f, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glm::ivec2 resolution = window->GetResolution();
+    // Sets the screen area where to draw
+    glViewport(0, 0, resolution.x, resolution.y);
+}
+
+void Tema2::Update(float deltaTimeSeconds) {
+    glm::mat4 terrainModel = transform::Scale(3, 3, 3);
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    //RenderSimpleMesh(meshes["locomotive"], shaders["SimpleShader"], boxModel);
+    //RenderSimpleMesh(meshes["wagon"], shaders["SimpleShader"], wagModel);
+    RenderSimpleMesh(meshes["terrain"], shaders["SimpleShader"], terrainModel);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);   // disable writing into the depth buffer
+    RenderSimpleMesh(meshes["water"], shaders["WaterShader"], terrainModel);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+
+    glm::mat4 testPositions = transform::Translate(0, 5, 0);
+    RenderSimpleMesh(meshes["locomotive"], shaders["SimpleShader"], testPositions);
+
+    float centerX = 1.0f * stations[0].first - MAP_CENTER;
+    float centerZ = 1.0f * stations[0].second - MAP_CENTER;
+    glm::mat4 stationModel = transform::Translate(3 * centerX, 3 * heightMap[stations[0].first][stations[0].second] + 1.5f, 3 * centerZ) * transform::Scale(3, 3, 3);
+
+    RenderSimpleMesh(meshes["mainStation"], shaders["SimpleShader"], stationModel);
+
+    for (int i = 1; i < 7; i++) {
+        float centerX = 1.0f * stations[i].first - MAP_CENTER;
+        float centerZ = 1.0f * stations[i].second - MAP_CENTER;
+        glm::mat4 stationModel = transform::Translate(3 * centerX, 3 * heightMap[stations[i].first][stations[i].second] + 1.5f, 3 * centerZ) * transform::Scale(3, 3, 3);
+
+        if (i % 3 == RESOURCE_COAL) {
+            RenderSimpleMesh(meshes["coalStation"], shaders["SimpleShader"], stationModel);
+        }
+        else if (i % 3 == RESOURCE_BRICK) {
+            RenderSimpleMesh(meshes["brickStation"], shaders["SimpleShader"], stationModel);
+        }
+        else {
+            RenderSimpleMesh(meshes["woodStation"], shaders["SimpleShader"], stationModel);
+        }
+    }
+
+    RenderSimpleMesh(meshes["railway"], shaders["SimpleShader"], terrainModel);
+}
+
+void Tema2::FrameEnd()
+{
+}
+
+// Controlling
+void Tema2::OnInputUpdate(float deltaTime, int mods)
+{
+    // move the camera only if MOUSE_RIGHT button is pressed
+    if (window->MouseHold(GLFW_MOUSE_BUTTON_RIGHT))
+    {
+        float cameraSpeed = 50.0f;
+
+        if (window->KeyHold(GLFW_KEY_W)) {
+            camera->MoveForward(cameraSpeed * deltaTime);
+        }
+
+        if (window->KeyHold(GLFW_KEY_A)) {
+            camera->TranslateRight(-cameraSpeed * deltaTime);
+        }
+
+        if (window->KeyHold(GLFW_KEY_S)) {
+            camera->MoveForward(-cameraSpeed * deltaTime);
+        }
+
+        if (window->KeyHold(GLFW_KEY_D)) {
+            camera->TranslateRight(cameraSpeed * deltaTime);
+        }
+
+        if (window->KeyHold(GLFW_KEY_Q)) {
+            camera->TranslateUpward(-cameraSpeed * deltaTime);
+
+        }
+
+        if (window->KeyHold(GLFW_KEY_E)) {
+            camera->TranslateUpward(cameraSpeed * deltaTime);
+        }
+    }
+}
+
+
+void Tema2::OnKeyPress(int key, int mods)
+{
+
+}
+
+void Tema2::OnKeyRelease(int key, int mods)
+{
+
+}
+
+
+void Tema2::OnMouseMove(int mouseX, int mouseY, int deltaX, int deltaY)
+{
+    if (window->MouseHold(GLFW_MOUSE_BUTTON_RIGHT))
+    {
+        float sensivityOX = 0.001f;
+        float sensivityOY = 0.001f;
+
+        camera->RotateFirstPerson_OY(-deltaX * sensivityOX);
+        camera->RotateFirstPerson_OX(-deltaY * sensivityOY);
+    }
+}
+
+
+void Tema2::OnMouseBtnPress(int mouseX, int mouseY, int button, int mods)
+{
+    
+}
+
+
+void Tema2::OnMouseBtnRelease(int mouseX, int mouseY, int button, int mods)
+{
+    
+}
+
+
+void Tema2::OnMouseScroll(int mouseX, int mouseY, int offsetX, int offsetY)
+{
+}
+
+
+void Tema2::OnWindowResize(int width, int height)
+{
+}
+
+// Helper functions for meshes
+void Tema2::CreateMesh(const char* name, const std::vector<VertexFormat>& vertices, const std::vector<unsigned int>& indices)
+{
+    unsigned int VAO = 0;
+    // Create the VAO and bind it
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    // Create the VBO and bind it
+    unsigned int VBO;
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+
+    // Send vertices data into the VBO buffer
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices[0]) * vertices.size(), &vertices[0], GL_STATIC_DRAW);
+
+    // Create the IBO and bind it
+    unsigned int IBO;
+    glGenBuffers(1, &IBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, IBO);
+
+    // Send indices data into the IBO buffer
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices[0]) * indices.size(), &indices[0], GL_STATIC_DRAW);
+
+    // Set vertex position attribute
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexFormat), 0);
+
+    // Set vertex normal attribute
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexFormat), (void*)(sizeof(glm::vec3)));
+
+    // Set vertex color attribute
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexFormat), (void*)(2 * sizeof(glm::vec3) + sizeof(glm::vec2)));
+
+    // Unbind the VAO
+    glBindVertexArray(0);
+
+    // Check for OpenGL errors
+    CheckOpenGLError();
+
+    // Mesh information is saved into a Mesh object
+    meshes[name] = new Mesh(name);
+    meshes[name]->InitFromBuffer(VAO, static_cast<unsigned int>(indices.size()));
+    meshes[name]->vertices = vertices;
+    meshes[name]->indices = indices;
+}
+
+void Tema2::RenderSimpleMesh(Mesh* mesh, Shader* shader, const glm::mat4& modelMatrix)
+{
+    if (!mesh || !shader || !shader->GetProgramID())
+        return;
+
+    // Render an object using the specified shader and the specified position
+    glUseProgram(shader->program);
+
+    // Get shader location for uniform mat4 "Model"
+    int modelUniformLoc = glGetUniformLocation(shader->GetProgramID(), "Model");
+
+    // Set shader uniform "Model" to modelMatrix
+    glUniformMatrix4fv(modelUniformLoc, 1, GL_FALSE, glm::value_ptr(modelMatrix));
+
+    // Get shader location for uniform mat4 "View"
+    int viewUniformLoc = glGetUniformLocation(shader->GetProgramID(), "View");
+
+    // Set shader uniform "View" to viewMatrix
+    glm::mat4 viewMatrix = camera->GetViewMatrix();
+
+    // Get shader location for uniform mat4 "Projection"
+    glUniformMatrix4fv(viewUniformLoc, 1, GL_FALSE, glm::value_ptr(viewMatrix));
+
+    // Set shader uniform "Projection" to projectionMatrix
+    int projUniformLoc = glGetUniformLocation(shader->GetProgramID(), "Projection");
+    glUniformMatrix4fv(projUniformLoc, 1, GL_FALSE, glm::value_ptr(projectionMatrix));
+
+    //Set the light position uniform
+    int lightPosLoc = glGetUniformLocation(shader->GetProgramID(), "lightPos");
+    glm::vec3 lightPos = glm::vec3(0, 125, 0);
+    glUniform3fv(lightPosLoc, 1, glm::value_ptr(lightPos));
+
+    // Draw the object
+    glBindVertexArray(mesh->GetBuffers()->m_VAO);
+    glDrawElements(mesh->GetDrawMode(), static_cast<int>(mesh->indices.size()), GL_UNSIGNED_INT, 0);
+}
+
+void Tema2::MakeLocomotive() {
+    auto locomotive = create_cube_vertices(1.0f, 1.0f, 1.0f, glm::vec3(0.557f, 0.89f, 0.004f));
+    glm::mat4 newPos = glm::mat4(1);
+
+    auto engine = create_tube_vertices(0.25f, 1.5f, glm::vec3(0.035f, 0.224f, 0.671f));
+    newPos = transform::Translate(0, -0.25f, 1.25f) * transform::RotateOX(glm::radians(90.0f));
+    add_vertices(locomotive, engine, newPos);
+
+    auto platform = create_cube_vertices(1, 0.1f, 2.75f, glm::vec3(0.91f, 0.941f, 0.231f));
+    newPos = transform::Translate(0, -0.55f, 0.875);
+    add_vertices(locomotive, platform, newPos);
+
+    auto nose = create_tube_vertices(0.05, 0.125, glm::vec3(0.169, 0.169, 0.149));
+    newPos = transform::Translate(0, -0.25, 2) * transform::RotateOX(glm::radians(90.0f));
+    add_vertices(locomotive, nose, newPos);
+
+    auto wheel = create_tube_vertices(0.175, 0.2, glm::vec3(0.722, 0.275, 0.251));
+    auto axle = create_tube_vertices(0.04, 0.95, glm::vec3(0.169, 0.169, 0.149));
+    float z = -0.25;
+    float step = 0.38;
+    for (int i = 0; i < 7; i++) {
+        newPos = transform::Translate(0.35, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(locomotive, wheel, newPos);
+
+        newPos = transform::Translate(-0.35, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(locomotive, wheel, newPos);
+
+        newPos = transform::Translate(0, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(locomotive, axle, newPos);
+        z += step;
+    }
+
+    CreateMesh("locomotive", locomotive.first, locomotive.second);
+}
+
+void Tema2::MakeWagon() {
+    auto wagon = create_cube_vertices(1.0f, 1.0f, 2.75f, glm::vec3(0.557f, 0.89f, 0.004f));
+    glm::mat4 newPos = glm::mat4(1);
+
+    auto platform = create_cube_vertices(1, 0.1f, 2.75f, glm::vec3(0.91f, 0.941f, 0.231f));
+    newPos = transform::Translate(0, -0.55f, 0);
+    add_vertices(wagon, platform, newPos);
+
+    auto wheel = create_tube_vertices(0.175, 0.2, glm::vec3(0.722, 0.275, 0.251));
+    auto axle = create_tube_vertices(0.04, 0.95, glm::vec3(0.169, 0.169, 0.149));
+    float z = -1.15;
+    float step = 2.25;
+    for (int i = 0; i < 2; i++) {
+        newPos = transform::Translate(0.35, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(wagon, wheel, newPos);
+
+        newPos = transform::Translate(-0.35, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(wagon, wheel, newPos);
+
+        newPos = transform::Translate(0, -0.775, z) * transform::RotateOZ(glm::radians(90.0f));
+        add_vertices(wagon, axle, newPos);
+        z += step;
+    }
+
+    CreateMesh("wagon", wagon.first, wagon.second);
+}
+
+
+// Terrain generation functions
+static float getSmoothstepAt(float a, float b, float t) {
+    return a + (b - a) * t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+static float getDotAt(int i, int j, int cornerI, int cornerJ, glm::vec2 randVect) {
+    int di = i - MAP_VECTOR_INTERVAL * cornerI;
+    int dj = j - MAP_VECTOR_INTERVAL * cornerJ;
+    return glm::dot(glm::vec2((float)di, (float)dj), randVect);
+}
+
+void Tema2::GeneratePerlin() {
+    int corners = MAP_SIZE / MAP_VECTOR_INTERVAL + 1;
+    vector<vector<glm::vec2>> gridCornerVectors(corners, vector<glm::vec2>(corners, glm::vec2(0)));
+
+    for (int i = 0; i < corners; i++) {
+        for (int j = 0; j < corners; j++) {
+            float randomX = ((rand() % 1000) - 500) / 500.0f;
+            float randomY = ((rand() % 1000) - 500) / 500.0f;
+            gridCornerVectors[i][j] = glm::normalize(glm::vec2(randomX, randomY));
+        }
+    }
+
+    for (int i = 0; i < MAP_SIZE - 1; i++) {
+        for (int j = 0; j < MAP_SIZE - 1; j++) {
+            int cornerJ0 = j / MAP_VECTOR_INTERVAL;
+            int cornerJ1 = cornerJ0 + 1;
+            int cornerI0 = i / MAP_VECTOR_INTERVAL;
+            int cornerI1 = cornerI0 + 1;
+
+            float topLeft = getDotAt(i, j, cornerI0, cornerJ0, gridCornerVectors[cornerI0][cornerJ0]);
+            float topRight = getDotAt(i, j, cornerI0, cornerJ1, gridCornerVectors[cornerI0][cornerJ1]);
+            float bottomLeft = getDotAt(i, j, cornerI1, cornerJ0, gridCornerVectors[cornerI1][cornerJ0]);
+            float bottomRight = getDotAt(i, j, cornerI1, cornerJ1, gridCornerVectors[cornerI1][cornerJ1]);
+
+            float ti = 1.0f * (i - cornerI0 * MAP_VECTOR_INTERVAL) / MAP_VECTOR_INTERVAL;
+            float tj = 1.0f * (j - cornerJ0 * MAP_VECTOR_INTERVAL) / MAP_VECTOR_INTERVAL;
+
+            float top = getSmoothstepAt(topLeft, topRight, tj);
+            float bottom = getSmoothstepAt(bottomLeft, bottomRight, tj);
+            heightMap[i][j] = max(0.5f * getSmoothstepAt(top, bottom, ti), -3.0f);
+
+            if (heightMap[i][j] > 3.5) {
+                heightMap[i][j] *= 3.5;
+                indexMap[i][j] = INDEX_MOUNTAIN;
+            }
+        }
+    }
+
+    for (int i = 0; i < MAP_SIZE - 1; i++) {
+        int cornerI0 = i / MAP_VECTOR_INTERVAL;
+        int cornerI1 = cornerI0 + 1;
+        int cornerJ = MAP_SIZE / MAP_VECTOR_INTERVAL;
+
+        float top = getDotAt(i, MAP_SIZE - 1, cornerI0, cornerJ, gridCornerVectors[cornerI0][cornerJ]);
+        float bottom = getDotAt(i, MAP_SIZE - 1, cornerI1, cornerJ, gridCornerVectors[cornerI1][cornerJ]);
+
+        float ti = 1.0f * (i - cornerI0 * MAP_VECTOR_INTERVAL) / MAP_VECTOR_INTERVAL;
+        heightMap[i][MAP_SIZE - 1] = max(0.5f * getSmoothstepAt(top, bottom, ti), -3.0f);
+
+        if (heightMap[i][MAP_SIZE - 1] > 3.5) {
+            heightMap[i][MAP_SIZE - 1] *= 3.5;
+            indexMap[i][MAP_SIZE - 1] = INDEX_MOUNTAIN;
+        }
+    }
+
+    for (int j = 0; j < MAP_SIZE - 1; j++) {
+        int cornerJ0 = j / MAP_VECTOR_INTERVAL;
+        int cornerJ1 = cornerJ0 + 1;
+        int cornerI = MAP_SIZE / MAP_VECTOR_INTERVAL;
+
+        float left = getDotAt(MAP_SIZE - 1, j, cornerI, cornerJ0, gridCornerVectors[cornerI][cornerJ0]);
+        float right = getDotAt(MAP_SIZE - 1, j, cornerI, cornerJ1, gridCornerVectors[cornerI][cornerJ1]);
+
+        float tj = 1.0f * (j - cornerJ0 * MAP_VECTOR_INTERVAL) / MAP_VECTOR_INTERVAL;
+        heightMap[MAP_SIZE - 1][j] = max(0.5f * getSmoothstepAt(left, right, tj), -3.0f);
+
+        if (heightMap[MAP_SIZE - 1][j] > 3.5) {
+            heightMap[MAP_SIZE - 1][j] *= 3.5;
+            indexMap[MAP_SIZE - 1][j] = INDEX_MOUNTAIN;
+        }
+    }
+}
+
+void Tema2::AddRiver() {
+    // Generate a river, using a Bezier curve of order 3
+    int leftI = rand() % MAP_SIZE;
+    int leftMiddleI = 20;
+    int rightMiddleI = 80;
+    int rightI = rand() % MAP_SIZE;
+
+    for (int j = 0; j < MAP_SIZE; j++) {
+        float t = j / 100.0f;
+        float pointI = pow(1 - t, 3) * leftI + 3 * pow(1 - t, 2) * t * leftMiddleI + 3 * (1 - t) * t * t * rightMiddleI + t * t * t * rightI;
+        int I = (int)pointI;
+        for (int i = I - 3; i <= I + 3; i++) {
+            if (i < 0 || i >= MAP_SIZE) continue;
+            if (abs(I - i) == 3) {
+                heightMap[i][j] = -3.4f;
+            }
+            else if (abs(I - i) == 2) {
+                heightMap[i][j] = -4.2f;
+            }
+            else if (abs(I - i) == 1) {
+                heightMap[i][j] = -4.6f;
+            }
+            else {
+                heightMap[i][j] = -5.0f;
+            }
+            indexMap[i][j] = INDEX_RIVER;
+        }
+    }
+}
+
+void Tema2::MakeTerrain() {
+    // Bulky function, trust the process
+    pair<vector<VertexFormat>, vector<unsigned int>> terrain = { vector<VertexFormat>(), vector<unsigned int>() };
+    glm::vec3 terrain_color = glm::vec3(0.412f, 0.812f, 0.071f);
+    glm::vec3 river_bed_color = glm::vec3(0.859f, 0.851f, 0.133f);
+    glm::vec3 mountain_color = glm::vec3(0.369f, 0.102f, 0.027f);
+    for (int i = 0; i < MAP_SIZE; i++) {
+        for (int j = 0; j < MAP_SIZE; j++) {
+            // i will be X and j will be Z - decided by a fair coin flip
+            float offsetX = (i - MAP_CENTER);
+            float offsetZ = (j - MAP_CENTER);
+
+            glm::vec3 use_color = glm::vec3(1);
+            if (indexMap[i][j] & INDEX_TERRAIN) {
+                use_color = terrain_color;
+            }
+            else if (indexMap[i][j] & INDEX_RIVER) {
+                use_color = river_bed_color;
+            }
+            else if (indexMap[i][j] & INDEX_MOUNTAIN) {
+                use_color = mountain_color;
+            }
+            
+            // Y+
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 1, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 1, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 1, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 1, 0)));
+
+            // Z+, ZN+
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 0, 1)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 0, 1)));
+
+            // Z+, ZN-
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 0, -1)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(0, 0, -1)));
+
+            // Z- ZN+
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 0, +1)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 0, +1)));
+
+            // Z- ZN-
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 0, -1)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(0, 0, -1)));
+
+            // X+ XN+
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(1, 0, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(1, 0, 0)));
+
+            // X+ XN-
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(-1, 0, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(-1, 0, 0)));
+
+            // X- XN+
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(1, 0, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(1, 0, 0)));
+
+            // X- XN-
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ - 0.5), use_color, glm::vec3(-1, 0, 0)));
+            terrain.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, heightMap[i][j], offsetZ + 0.5), use_color, glm::vec3(-1, 0, 0)));
+
+            int current_face_idx = 20 * (MAP_SIZE * i + j);
+
+            // Render top face
+            terrain.second.push_back(current_face_idx + 0);
+            terrain.second.push_back(current_face_idx + 1);
+            terrain.second.push_back(current_face_idx + 3);
+            terrain.second.push_back(current_face_idx + 0);
+            terrain.second.push_back(current_face_idx + 3);
+            terrain.second.push_back(current_face_idx + 2);
+
+            // Render the face towards i - 1 (Which I will consider X- here)
+            // If the current height is bigger than the one at i - 1, that means the face is oriented towards X-
+            // Otherwise, it is oriented towards X+
+
+            if (i) {
+                int top_face_idx = 20 * (MAP_SIZE * (i - 1) + j);
+                if (heightMap[i][j] > heightMap[i - 1][j]) {
+                    terrain.second.push_back(current_face_idx + 19);
+                    terrain.second.push_back(current_face_idx + 18);
+                    terrain.second.push_back(top_face_idx + 14);
+                    terrain.second.push_back(current_face_idx + 19);
+                    terrain.second.push_back(top_face_idx + 14);
+                    terrain.second.push_back(top_face_idx + 15);
+                }
+                else {
+                    terrain.second.push_back(current_face_idx + 17);
+                    terrain.second.push_back(current_face_idx + 16);
+                    terrain.second.push_back(top_face_idx + 12);
+                    terrain.second.push_back(current_face_idx + 17);
+                    terrain.second.push_back(top_face_idx + 12);
+                    terrain.second.push_back(top_face_idx + 13);
+                }
+            }
+            
+            // Render the face towards j - 1 (Which I will consider Z- here)
+            // If the current height is bigger than the one at j - 1, that means the face is oriented towards Z-
+            // Otherwise, it is oriented towards Z+
+
+            if (j) {
+                int left_face_idx = 20 * (MAP_SIZE * i + j - 1);
+                if (heightMap[i][j] > heightMap[i][j - 1]) {
+                    terrain.second.push_back(current_face_idx + 10);
+                    terrain.second.push_back(current_face_idx + 11);
+                    terrain.second.push_back(left_face_idx + 6);
+                    terrain.second.push_back(current_face_idx + 11);
+                    terrain.second.push_back(left_face_idx + 7);
+                    terrain.second.push_back(left_face_idx + 6);
+                }
+                else {
+                    terrain.second.push_back(current_face_idx + 8);
+                    terrain.second.push_back(current_face_idx + 9);
+                    terrain.second.push_back(left_face_idx + 4);
+                    terrain.second.push_back(current_face_idx + 9);
+                    terrain.second.push_back(left_face_idx + 5);
+                    terrain.second.push_back(left_face_idx + 4);
+                }
+            }
+        }
+    }
+
+    CreateMesh("terrain", terrain.first, terrain.second);
+}
+
+void Tema2::MakeWater() {
+    pair<vector<VertexFormat>, vector<unsigned int>> water = { vector<VertexFormat>(), vector<unsigned int>() };
+    glm::vec3 color = glm::vec3(0.133f, 0.647f, 0.859f);
+    for (int i = 0; i < MAP_SIZE; i++) {
+        for (int j = 0; j < MAP_SIZE; j++) {
+            if (indexMap[i][j] & INDEX_RIVER) {
+                float offsetX = (i - MAP_CENTER);
+                float offsetZ = (j - MAP_CENTER);
+
+                water.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, -3.2, offsetZ - 0.5), color, glm::vec3(0, 1, 0)));
+                water.first.push_back(VertexFormat(glm::vec3(offsetX - 0.5, -3.2, offsetZ + 0.5), color, glm::vec3(0, 1, 0)));
+                water.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, -3.2, offsetZ - 0.5), color, glm::vec3(0, 1, 0)));
+                water.first.push_back(VertexFormat(glm::vec3(offsetX + 0.5, -3.2, offsetZ + 0.5), color, glm::vec3(0, 1, 0)));
+
+                int current_face_idx = water.first.size() - 4;
+
+                // Render top face
+                water.second.push_back(current_face_idx + 0);
+                water.second.push_back(current_face_idx + 1);
+                water.second.push_back(current_face_idx + 3);
+                water.second.push_back(current_face_idx + 0);
+                water.second.push_back(current_face_idx + 3);
+                water.second.push_back(current_face_idx + 2);
+            }
+        }
+    }
+
+    CreateMesh("water", water.first, water.second);
+}
+
+void Tema2::MakeRails() {
+    glm::vec3 railColor = glm::vec3(0.271, 0.306, 0.31);
+
+    vector<VertexFormat> verticesTerrainRail = {
+        VertexFormat(glm::vec3(-0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0))
+    };
+
+    vector<unsigned int> indicesTerrainRail = {
+        0, 1, 3,
+        0, 3, 2
+    };
+
+    CreateMesh("terrain_rail", verticesTerrainRail, indicesTerrainRail);
+
+    vector<VertexFormat> verticesBridgeRail = {
+        VertexFormat(glm::vec3(-0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.3, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.3, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+
+        VertexFormat(glm::vec3(-0.1, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.1, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.1, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.1, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+
+        VertexFormat(glm::vec3(0.3, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.3, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+    };
+
+    vector<unsigned int> indicesBridgeRail = {
+        0, 1, 3,
+        0, 3, 2,
+
+        4, 5, 7,
+        4, 7, 6,
+
+        8, 9, 11,
+        8, 11, 10
+    };
+
+    CreateMesh("bridge_rail", verticesBridgeRail, indicesBridgeRail);
+
+    vector<VertexFormat> verticesTunnelRail = {
+        VertexFormat(glm::vec3(-0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.2, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.2, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+
+        VertexFormat(glm::vec3(-0.2, 0.0001f, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.2, 0.0001f, -0.3), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.2, 0.0001f, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.2, 0.0001f, -0.3), railColor, glm::vec3(0, 1, 0)),
+
+        VertexFormat(glm::vec3(-0.2, 0.0001f, 0.3), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(-0.2, 0.0001f, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.2, 0.0001f, 0.3), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.2, 0.0001f, 0.5), railColor, glm::vec3(0, 1, 0)),
+
+        VertexFormat(glm::vec3(0.2, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.2, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, -0.5), railColor, glm::vec3(0, 1, 0)),
+        VertexFormat(glm::vec3(0.5, 0, 0.5), railColor, glm::vec3(0, 1, 0)),
+    };
+
+    vector<unsigned int> indicesTunnelRail = {
+        0, 1, 3,
+        0, 3, 2,
+
+        4, 5, 7,
+        4, 7, 6,
+
+        8, 9, 11,
+        8, 11, 10,
+
+        12, 13, 15,
+        12, 15, 14
+    };
+
+    CreateMesh("tunnel_rail", verticesTunnelRail, indicesTunnelRail);
+}
+
+void Tema2::MakeStation() {
+    auto woodStation = create_cube_vertices(1, 1, 1, glm::vec3(0.6f, 0.545f, 0.62f));
+    auto roofShort = create_pyramid_vertices(1, 1, glm::vec3(0.678f, 0.282f, 0.169f));
+    
+    glm::mat4 newPosition = glm::mat4(1);
+    newPosition = transform::Translate(0, 0.5f, 0);
+    add_vertices(woodStation, roofShort, newPosition);
+
+    auto coalStation = create_cube_vertices(1, 1, 1, glm::vec3(0.6f, 0.545f, 0.62f));
+    auto chimney = create_cube_vertices(0.2, 1, 0.2, glm::vec3(1, 1, 1));
+    newPosition = transform::Translate(0, 0.5, 0.3);
+    add_vertices(coalStation, chimney, newPosition);
+
+    auto mainStation = create_cube_vertices(1, 1, 3, glm::vec3(0.6f, 0.545f, 0.62f));
+    auto roofTall = create_pyramid_vertices(2, 1, glm::vec3(0.678f, 0.282f, 0.169f));
+    newPosition = transform::Translate(0, 0.5, 0);
+    add_vertices(mainStation, roofShort, newPosition);
+    newPosition = transform::Translate(0, 0.5, 1);
+    add_vertices(mainStation, roofTall, newPosition);
+    newPosition = transform::Translate(0, 0.5, -1);
+    add_vertices(mainStation, roofTall, newPosition);
+
+    auto brickStation = create_cube_vertices(0.5, 0.5, 1, glm::vec3(0.6f, 0.545f, 0.62f));
+    auto building = create_cube_vertices(1, 1, 1, glm::vec3(0.6f, 0.545f, 0.62f));
+    newPosition = transform::Translate(0, 0, 1);
+    add_vertices(brickStation, building, newPosition);
+    newPosition = transform::Translate(0, 0.5, 1);
+    add_vertices(brickStation, roofShort, newPosition);
+    newPosition = transform::Translate(0, 0, -1);
+    add_vertices(brickStation, building, newPosition);
+
+    CreateMesh("mainStation", mainStation.first, mainStation.second);
+    CreateMesh("woodStation", woodStation.first, woodStation.second);
+    CreateMesh("coalStation", coalStation.first, coalStation.second);
+    CreateMesh("brickStation", brickStation.first, brickStation.second);
+}
+
+void Tema2::AddStations() {
+    // Place down the main station
+    while (1) {
+        unsigned int posX = rand() % 50 + 25;
+        unsigned int posZ = rand() % 50 + 25;
+
+        if ((indexMap[posX][posZ - 1] & INDEX_TERRAIN) && (indexMap[posX][posZ] & INDEX_TERRAIN) && (indexMap[posX][posZ + 1] & INDEX_TERRAIN)) {
+            float minHeight = min(min(heightMap[posX][posZ - 1], heightMap[posX][posZ]), heightMap[posX][posZ + 1]);
+
+            heightMap[posX][posZ - 1] = minHeight;
+            heightMap[posX][posZ] = minHeight;
+            heightMap[posX][posZ + 1] = minHeight;
+
+            indexMap[posX][posZ - 1] |= INDEX_STATION;
+            indexMap[posX][posZ] |= INDEX_STATION;
+            indexMap[posX][posZ + 1] |= INDEX_STATION;
+            stations.push_back({ posX, posZ });
+            break;
+        }
+    }
+
+    for (int i = 1; i < 7; i++) {
+        while (1) {
+            unsigned int posX = rand() % (MAP_SIZE - 10) + 5;
+            unsigned int posZ = rand() % (MAP_SIZE - 10) + 5;
+
+            for (int i = 0; i < stations.size(); i++) {
+                if (glm::abs(posX - stations[i].first) + glm::abs(posZ - stations[i].second) <= 5) {
+                    continue;
+                }
+            }
+
+            // Coal stations
+            if (i % 3 == RESOURCE_COAL) {
+                if (indexMap[posX][posZ] & INDEX_TERRAIN) {
+
+                    indexMap[posX][posZ] |= INDEX_STATION;
+                    stations.push_back({ posX, posZ });
+                    break;
+                }
+            }
+            // Brick stations
+            else if (i % 3 == RESOURCE_BRICK) {
+                if ((indexMap[posX][posZ - 1] & INDEX_TERRAIN) && (indexMap[posX][posZ] & INDEX_TERRAIN) && (indexMap[posX][posZ + 1] & INDEX_TERRAIN)) {
+                    float minHeight = min(min(heightMap[posX][posZ - 1], heightMap[posX][posZ]), heightMap[posX][posZ + 1]);
+
+                    heightMap[posX][posZ - 1] = minHeight;
+                    heightMap[posX][posZ] = minHeight;
+                    heightMap[posX][posZ + 1] = minHeight;
+
+                    indexMap[posX][posZ - 1] |= INDEX_STATION;
+                    indexMap[posX][posZ] |= INDEX_STATION;
+                    indexMap[posX][posZ + 1] |= INDEX_STATION;
+                    stations.push_back({ posX, posZ });
+                    break;
+                }
+            }
+            // Wood stations
+            else {
+                if (indexMap[posX][posZ] & INDEX_TERRAIN) {
+
+                    indexMap[posX][posZ] |= INDEX_STATION;
+                    stations.push_back({ posX, posZ });
+                    break;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < stations.size(); i++) {
+        cout << stations[i].first << " " << stations[i].second << endl;
+    }
+}
+
+void Tema2::AddRails() {
+    // Pick the position of the intersections randomly (won't make the most sense, but whatever ...)
+    for (int i = 0; i < 3; i++) {
+        while (1) {
+            unsigned int posX = rand() % 60 + 20;
+            unsigned int posZ = rand() % 60 + 20;
+
+            for (int i = 0; i < intersections.size(); i++) {
+                if (glm::abs(posX - intersections[i].first) + glm::abs(posZ - intersections[i].second) <= 10) {
+                    continue;
+                }
+            }
+
+            for (int i = 0; i < stations.size(); i++) {
+                if (glm::abs(posX - stations[i].first) + glm::abs(posZ - stations[i].second) <= 3) {
+                    continue;
+                }
+            }
+
+            // Might look bad, add if it don't work
+            /*if (indexMap[posX][posZ] & INDEX_RIVER) {
+                continue;
+            }*/
+            intersections.push_back({ posX, posZ });
+            break;
+        }
+    }
+
+    // Make the rail from main station to first intersection
+    float int1X = intersections[0].first;
+    float int1Z = intersections[0].second;
+    float mainX = stations[0].first;
+    float mainZ = stations[0].second;
+
+    if (int1X > mainX) {
+        mainX++;
+    }
+    else {
+        mainX--;
+    }
+    float stepX = (int1X - mainX) / 1000;
+    float stepZ = (int1Z - mainZ) / 1000;
+    
+    for (int i = 0; i < 1000; i++) {
+        float currentX = mainX + stepX * i;
+        float currentZ = mainZ + stepZ * i;
+
+        if (currentX == (int)currentX && currentZ == (int)currentZ) {
+            indexMap[(int)currentX][(int)currentZ + 1] |= INDEX_RAIL;
+        }
+        else {
+            indexMap[(int)currentX][(int)currentZ] |= INDEX_RAIL;
+        }
+    }
+
+    // Make rails from the first 3 resource stations to the 2nd intersection
+    for (int i = 1; i <= 3; i++) {
+        float int2X = intersections[1].first;
+        float int2Z = intersections[1].second;
+        float statX = stations[i].first;
+        float statZ = stations[i].second;
+
+        if (int2X > statX) {
+            statX++;
+        }
+        else {
+            statX--;
+        }
+        float stepX = (int2X - statX) / 1000;
+        float stepZ = (int2Z - statZ) / 1000;
+
+        for (int i = 0; i < 1000; i++) {
+            float currentX = statX + stepX * i;
+            float currentZ = statZ + stepZ * i;
+
+            if (currentX == (int)currentX && currentZ == (int)currentZ) {
+                indexMap[(int)currentX][(int)currentZ + 1] |= INDEX_RAIL;
+            }
+            else {
+                indexMap[(int)currentX][(int)currentZ] |= INDEX_RAIL;
+            }
+        }
+    }
+
+    // Make rails from the last 3 resource stations to the 3nd intersection
+    for (int i = 4; i <= 6; i++) {
+        float int3X = intersections[2].first;
+        float int3Z = intersections[2].second;
+        float statX = stations[i].first;
+        float statZ = stations[i].second;
+
+        if (int3X > statX) {
+            statX++;
+        }
+        else {
+            statX--;
+        }
+        float stepX = (int3X - statX) / 1000;
+        float stepZ = (int3Z - statZ) / 1000;
+
+        for (int i = 0; i < 1000; i++) {
+            float currentX = statX + stepX * i;
+            float currentZ = statZ + stepZ * i;
+
+            if (currentX == (int)currentX && currentZ == (int)currentZ) {
+                indexMap[(int)currentX][(int)currentZ + 1] |= INDEX_RAIL;
+            }
+            else {
+                indexMap[(int)currentX][(int)currentZ] |= INDEX_RAIL;
+            }
+        }
+    }
+
+    // Connect the intersections
+    float int2X = intersections[1].first;
+    float int2Z = intersections[1].second;
+
+    if (int1X > int2X) {
+        int2X++;
+    }
+    else {
+        int2X--;
+    }
+    stepX = (int1X - int2X) / 1000;
+    stepZ = (int1Z - int2Z) / 1000;
+
+    for (int i = 0; i < 1000; i++) {
+        float currentX = int2X + stepX * i;
+        float currentZ = int2Z + stepZ * i;
+
+        if (currentX == (int)currentX && currentZ == (int)currentZ) {
+            indexMap[(int)currentX][(int)currentZ + 1] |= INDEX_RAIL;
+        }
+        else {
+            indexMap[(int)currentX][(int)currentZ] |= INDEX_RAIL;
+        }
+    }
+
+    float int3X = intersections[2].first;
+    float int3Z = intersections[2].second;
+
+    if (int1X > int3X) {
+        int3X++;
+    }
+    else {
+        int3X--;
+    }
+    stepX = (int1X - int3X) / 1000;
+    stepZ = (int1Z - int3Z) / 1000;
+
+    for (int i = 0; i < 1000; i++) {
+        float currentX = int3X + stepX * i;
+        float currentZ = int3Z + stepZ * i;
+
+        if (currentX == (int)currentX && currentZ == (int)currentZ) {
+            indexMap[(int)currentX][(int)currentZ + 1] |= INDEX_RAIL;
+        }
+        else {
+            indexMap[(int)currentX][(int)currentZ] |= INDEX_RAIL;
+        }
+    }
+}
+
+void Tema2::MakeRailway() {
+    pair<vector<VertexFormat>, vector<unsigned int>> railway = { vector<VertexFormat>(), vector<unsigned int>() };
+    pair<vector<VertexFormat>, vector<unsigned int>> terrain_rail = { meshes["terrain_rail"]->vertices, meshes["terrain_rail"]->indices };
+    pair<vector<VertexFormat>, vector<unsigned int>> bridge_rail = { meshes["bridge_rail"]->vertices, meshes["bridge_rail"]->indices };
+    pair<vector<VertexFormat>, vector<unsigned int>> tunnel_rail = { meshes["tunnel_rail"]->vertices, meshes["tunnel_rail"]->indices };
+    for (int i = 0; i < MAP_SIZE; i++) {
+        for (int j = 0; j < MAP_SIZE; j++) {
+            if (indexMap[i][j] & INDEX_RAIL) {
+                float offsetX = (i - MAP_CENTER);
+                float offsetZ = (j - MAP_CENTER);
+                if (indexMap[i - 1][j] & INDEX_RAIL) {
+                    glm::mat4 railPos = transform::Translate(offsetX - 0.25, heightMap[i][j] + 0.001f, offsetZ);
+                    if (indexMap[i][j] & INDEX_TERRAIN) {
+                        add_vertices(railway, terrain_rail, railPos);
+                    }
+                    else if (indexMap[i][j] & INDEX_RIVER) {
+                        add_vertices(railway, bridge_rail, railPos);
+                    }
+                    else {
+                        add_vertices(railway, tunnel_rail, railPos);
+                    }
+                }
+                if (indexMap[i + 1][j] & INDEX_RAIL) {
+                    glm::mat4 railPos = transform::Translate(offsetX + 0.25, heightMap[i][j] + 0.001f, offsetZ);
+                    if (indexMap[i][j] & INDEX_TERRAIN) {
+                        add_vertices(railway, terrain_rail, railPos);
+                    }
+                    else if (indexMap[i][j] & INDEX_RIVER) {
+                        add_vertices(railway, bridge_rail, railPos);
+                    }
+                    else {
+                        add_vertices(railway, tunnel_rail, railPos);
+                    }
+                }
+                if (indexMap[i][j - 1] & INDEX_RAIL) {
+                    glm::mat4 railPos = transform::Translate(offsetX, heightMap[i][j] + 0.001f, offsetZ - 0.25);
+                    if (indexMap[i][j] & INDEX_TERRAIN) {
+                        add_vertices(railway, terrain_rail, railPos);
+                    }
+                    else if (indexMap[i][j] & INDEX_RIVER) {
+                        add_vertices(railway, bridge_rail, railPos);
+                    }
+                    else {
+                        add_vertices(railway, tunnel_rail, railPos);
+                    }
+                }
+                if (indexMap[i][j + 1] & INDEX_RAIL) {
+                    glm::mat4 railPos = transform::Translate(offsetX, heightMap[i][j] + 0.001f, offsetZ + 0.25);
+                    if (indexMap[i][j] & INDEX_TERRAIN) {
+                        add_vertices(railway, terrain_rail, railPos);
+                    }
+                    else if (indexMap[i][j] & INDEX_RIVER) {
+                        add_vertices(railway, bridge_rail, railPos);
+                    }
+                    else {
+                        add_vertices(railway, tunnel_rail, railPos);
+                    }
+                }
+            }
+        }
+    }
+
+    CreateMesh("railway", railway.first, railway.second);
+}
